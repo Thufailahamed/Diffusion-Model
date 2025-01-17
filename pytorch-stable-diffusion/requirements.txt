@@ -1,0 +1,6 @@
+torch==2.5.1
+numpy
+tqdm
+transformers
+lightning
+pillow
