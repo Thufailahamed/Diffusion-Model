@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import axios from "axios";
+import { motion } from "framer-motion";
 import "./App.css";
 
 function App() {
@@ -7,77 +8,129 @@ function App() {
   const [image, setImage] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [progress, setProgress] = useState(0);
-  const [imageId, setImageId] = useState(null); // Unique ID for each request
+  const [mode, setMode] = useState("txt2img");
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [previewImage, setPreviewImage] = useState(null);
+  const [strength, setStrength] = useState(1.0);
+  const [model, setModel] = useState("default");
 
   const handleGenerateImage = async () => {
     setLoading(true);
     setError(null);
-    setProgress(0);
     setImage(null);
-
     try {
+      const formData = new FormData();
+      formData.append("prompt", prompt);
+      formData.append("mode", mode);
+      formData.append("model", model);
+      if (mode === "img2img" && selectedImage) {
+        formData.append("image", selectedImage);
+        formData.append("strength", strength);
+      }
       const response = await axios.post(
         "http://127.0.0.1:5000/start-generation",
-        { prompt }
+        formData
       );
-      const newImageId = response.data.image_id;
-      setImageId(newImageId);
-
-      const eventSource = new EventSource(
-        `http://127.0.0.1:5000/generate-progress/${newImageId}`
-      );
-
-      eventSource.onmessage = function (event) {
-        if (event.data === "image") {
-          eventSource.close();
-          fetchImage(newImageId);
-        } else {
-          setProgress(parseFloat(event.data)); // Update progress
-        }
-      };
-
-      eventSource.onerror = function () {
-        setError("Error occurred during image generation.");
-        eventSource.close();
-      };
+      if (response.data.status === "success") {
+        setImage(response.data.image_url);
+      } else {
+        setError(response.data.message || "Image generation failed.");
+      }
     } catch (error) {
       setError("An error occurred while generating the image.");
+    } finally {
       setLoading(false);
     }
   };
 
-  const fetchImage = async (imageId) => {
-    try {
-      const response = await axios.get(
-        `http://127.0.0.1:5000/get-image/${imageId}`,
-        {
-          responseType: "blob",
-        }
-      );
+  const handleImageUpload = (event) => {
+    const file = event.target.files[0];
+    if (file) {
+      setSelectedImage(file);
+      setPreviewImage(URL.createObjectURL(file));
+    }
+  };
 
-      if (response.status === 202) {
-        setTimeout(() => fetchImage(imageId), 1000); // Retry fetching if not ready
-      } else {
-        const imageUrl = URL.createObjectURL(response.data);
-        setImage(imageUrl);
-        setLoading(false);
-      }
-    } catch (error) {
-      setError("An error occurred while fetching the image.");
+  const handleSaveImage = () => {
+    if (image) {
+      const link = document.createElement("a");
+      link.href = image;
+      link.download = "generated_image.png";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
     }
   };
 
   return (
     <div className="App">
-      <div className="container">
-        <h1 className="title">Image Generator</h1>
-        <textarea
+      {/* Header */}
+      <header className="app-header">
+        <img src="/prism.jpg" alt="PRISM Logo" className="prism-logo" />
+        <h1 className="header-title">AI Image Generator</h1>
+      </header>
+
+      <p className="sub-text">Create stunning visuals with AI</p>
+
+      <motion.div
+        className="container"
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5 }}
+      >
+        <motion.textarea
           className="prompt-input"
-          placeholder="Enter a prompt to generate an image..."
+          placeholder="Describe what you want to generate..."
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-        ></textarea>
+        ></motion.textarea>
+
+        {/* Model Selection */}
+        <div className="selection-container">
+          <label>Model:</label>
+          <select value={model} onChange={(e) => setModel(e.target.value)}>
+            <option value="default">Default Model</option>
+            <option value="inkpunk">Inkpunk Model</option>
+          </select>
+          <p>Selected Model: {model}</p>
+        </div>
+
+        {/* Mode Selection */}
+        <div className="selection-container">
+          <label>Mode:</label>
+          <select value={mode} onChange={(e) => setMode(e.target.value)}>
+            <option value="txt2img">Text to Image</option>
+            <option value="img2img">Image to Image</option>
+          </select>
+          <p>Selected Mode: {mode}</p>
+        </div>
+
+        {mode === "img2img" && (
+          <div className="image-upload">
+            <label htmlFor="upload" className="upload-btn">
+              Upload Image
+            </label>
+            <input
+              id="upload"
+              type="file"
+              accept="image/*"
+              onChange={handleImageUpload}
+              style={{ display: "none" }}
+            />
+          </div>
+        )}
+
+        {/* Center Uploaded Image */}
+        {mode === "img2img" && selectedImage && (
+          <div className="selected-image-container">
+            <img
+              src={previewImage}
+              alt="Selected for img2img"
+              className="selected-image"
+            />
+          </div>
+        )}
+
         <button
           onClick={handleGenerateImage}
           disabled={loading}
@@ -86,23 +139,17 @@ function App() {
           {loading ? "Generating..." : "Generate Image"}
         </button>
 
-        {progress > 0 && progress < 100 && (
-          <div className="progress-bar">
-            <div className="progress" style={{ width: `${progress}%` }}></div>
-          </div>
-        )}
-
         {error && <div className="error">{error}</div>}
 
         {image && (
-          <div>
+          <div className="generated-container">
             <img src={image} alt="Generated" className="generated-image" />
-            <button onClick={handleGenerateImage} className="generate-btn">
-              Generate New Image
+            <button onClick={handleSaveImage} className="save-btn">
+              Save Image
             </button>
           </div>
         )}
-      </div>
+      </motion.div>
     </div>
   );
 }
