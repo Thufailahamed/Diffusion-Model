@@ -1,102 +1,92 @@
-from flask import Flask, request, send_file, jsonify, Response
+import os
+import uuid
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-import io
 from PIL import Image
 import torch
+from transformers import CLIPTokenizer
 import model_loader
 import pipeline
-from transformers import CLIPTokenizer
-import threading
-import time
-import uuid  # For unique image IDs
+import random
+
 
 app = Flask(__name__)
 CORS(app)
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+UPLOAD_FOLDER = "uploads"
+OUTPUT_FOLDER = "outputs"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-# Load models and tokenizer once when the server starts
-model_file = "../data/v1-5-pruned-emaonly.ckpt"
-models = model_loader.preload_models_from_standard_weights(model_file, DEVICE)
-tokenizer = CLIPTokenizer("../data/vocab.json", merges_file="../data/merges.txt")
+MODEL_PATHS = {
+    "default": "../data/v1-5-pruned-emaonly.ckpt",
+    "inkpunk": "../data/inkpunk-diffusion-v1.ckpt",
+}
 
-# Dictionary to track progress & generated images
-generation_status = {}
+def get_device(user_choice):
+    if user_choice == "cuda" and torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
 
-def generate_image_task(prompt, image_id):
-    """Simulate image generation with progress updates."""
-    uncond_prompt = ""
-    do_cfg = True
-    cfg_scale = 8
-    strength = 0.9
-    sampler = "ddpm"
-    num_inference_steps = 50
-    seed = 42
+@app.route("/start-generation", methods=["POST"])
+def generate_image():
+    try:
+        prompt = request.form.get("prompt", "").strip()
+        mode = request.form.get("mode", "txt2img").strip()
+        model_choice = request.form.get("model", "default").strip()
+        strength = float(request.form.get("strength", "1.0"))
+        device_choice = request.form.get("device", "cpu")
+        device = get_device(device_choice)
 
-    # Reset progress
-    generation_status[image_id] = {"progress": 0, "image": None}
+        if not prompt:
+            return jsonify({"status": "error", "message": "Prompt cannot be empty"}), 400
 
-    for step in range(1, num_inference_steps + 1):
-        time.sleep(0.1)  # Simulate processing time
-        generation_status[image_id]["progress"] = step / num_inference_steps * 100
+        if model_choice not in MODEL_PATHS:
+            model_choice = "default"  
+        model_file = MODEL_PATHS[model_choice]
 
-    # Generate the image
-    output_image = pipeline.generate(
-        prompt=prompt,
-        uncond_prompt=uncond_prompt,
-        input_image=None,
-        strength=strength,
-        do_cfg=do_cfg,
-        cfg_scale=cfg_scale,
-        sampler_name=sampler,
-        n_inference_steps=num_inference_steps,
-        seed=seed,
-        models=models,
-        device=DEVICE,
-        idle_device="cpu",
-        tokenizer=tokenizer,
-    )
+        models = model_loader.preload_models_from_standard_weights(model_file, device)
 
-    # Convert image to bytes
-    img_byte_arr = io.BytesIO()
-    output_pil_image = Image.fromarray(output_image)
-    output_pil_image.save(img_byte_arr, format='JPEG')
-    img_byte_arr.seek(0)
+        input_image = None
+        if mode == "img2img":
+            image_file = request.files.get("image")
+            if image_file:
+                image_path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}.jpg")
+                image_file.save(image_path)
+                input_image = Image.open(image_path)
 
-    # Store the generated image
-    generation_status[image_id]["image"] = img_byte_arr.getvalue()
+        output_image = pipeline.generate(
+            prompt=prompt,
+            uncond_prompt="",
+            input_image=input_image,
+            strength=0.8,
+            do_cfg=True,
+            cfg_scale=8,
+            sampler_name="ddpm",
+            n_inference_steps=24,
+            seed = random.randint(0, 2**32 - 1),
+            models=models,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            idle_device="cpu",
+            tokenizer=CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32"),
+        )
 
-@app.route('/start-generation', methods=['POST'])
-def start_generation():
-    """Start a new image generation process."""
-    data = request.json
-    prompt = data.get("prompt", "").strip()
+        output_filename = f"{uuid.uuid4()}.jpg"
+        output_path = os.path.join(OUTPUT_FOLDER, output_filename)
+        Image.fromarray(output_image).save(output_path, format="JPEG")
 
-    if not prompt:
-        return jsonify({"error": "Prompt is required"}), 400
+        return jsonify({"status": "success", "image_url": f"http://127.0.0.1:5000/get-image/{output_filename}"})
 
-    image_id = str(uuid.uuid4())  # Unique image ID
-    threading.Thread(target=generate_image_task, args=(prompt, image_id)).start()
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-    return jsonify({"image_id": image_id}), 202
+@app.route("/get-image/<filename>")
+def get_generated_image(filename):
+    file_path = os.path.join(OUTPUT_FOLDER, filename)
+    if os.path.exists(file_path):
+        return send_file(file_path, mimetype="image/jpeg")
+    return jsonify({"status": "error", "message": "Image not found"}), 404
 
-@app.route('/generate-progress/<image_id>', methods=['GET'])
-def generate_progress(image_id):
-    """Send progress updates using Server-Sent Events (SSE)."""
-    def progress_stream():
-        while generation_status.get(image_id, {}).get("progress", 0) < 100:
-            yield f"data: {generation_status.get(image_id, {}).get('progress', 0)}\n\n"
-            time.sleep(0.1)
-        yield f"data: image\n\n"
 
-    return Response(progress_stream(), mimetype="text/event-stream")
-
-@app.route('/get-image/<image_id>', methods=['GET'])
-def get_image(image_id):
-    """Retrieve the generated image."""
-    if generation_status.get(image_id, {}).get("image"):
-        return send_file(io.BytesIO(generation_status[image_id]["image"]), mimetype="image/jpeg")
-    return jsonify({"status": "image generation in progress"}), 202
-
-if __name__ == '__main__':
-    app.run(debug=True)
+if __name__ == "__main__":
+    app.run(debug=False)
